@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ko" data-theme="dark">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🔧 브라우저 안의 브라우저</title>
+  <style>
+    :root {
+      --bg: hsl(230, 15%, 10%);
+      --panel: hsla(230, 15%, 15%, 0.85);
+      --accent: hsl(210, 80%, 55%);
+      --text: #e0e0e0;
+      --border: hsla(0, 0%, 100%, 0.1);
+      --radius: 12px;
+      --shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    header {
+      backdrop-filter: blur(12px);
+      background: var(--panel);
+      padding: 0.8rem 1rem;
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      box-shadow: var(--shadow);
+    }
+
+    input[type="url"] {
+      flex: 1;
+      padding: 0.6rem 0.8rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text);
+      font-size: 0.95rem;
+    }
+
+    button {
+      padding: 0.6rem 1rem;
+      border: none;
+      border-radius: var(--radius);
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+      font-weight: 600;
+      transition: background 0.2s;
+    }
+
+    button:hover {
+      background: hsl(210, 80%, 50%);
+    }
+
+    iframe {
+      flex: 1;
+      border: none;
+    }
+
+    footer {
+      text-align: center;
+      font-size: 0.75rem;
+      padding: 0.4rem;
+      color: #aaa;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <input id="urlInput" type="url" placeholder="https://example.com" />
+    <button id="goBtn">Go</button>
+  </header>
+  <iframe id="proxyFrame" src="about:blank" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+  <footer>Ultraviolet reverse‑proxy UI – built with 🌐</footer>
+  <script>
+    // Register Ultraviolet service worker (uv.sw.js lives at project root)
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/uv.sw.js', { scope: '/' })
+        .then(reg => console.log('SW registered', reg.scope))
+        .catch(err => console.error('SW registration failed', err));
+    }
+    const prefix = '/service/'; // default prefix used by Ultraviolet
+    const urlInput = document.getElementById('urlInput');
+    const goBtn = document.getElementById('goBtn');
+    frame = document.getElementById('proxyFrame');
+    const navigate = () => {
+      const raw = urlInput.value.trim();
+      if (!raw) return;
+      try { new URL(raw); } catch { alert('유효한 URL을 입력하세요'); return; }
+      const encoded = encodeURIComponent(raw);
+      frame.src = prefix + encoded;
+    };
+    goBtn.addEventListener('click', navigate);
+    urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') navigate(); });
+  </script>
+</body>
+
+</html>
