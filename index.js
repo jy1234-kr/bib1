@@ -1,192 +1,175 @@
-// index.js - Cloudflare Workers reverse proxy with HTML rewriting and KV short URLs
-// ------------------------------------------------------------
-// This script is written for Wrangler v3 (ESM syntax).
-// It provides:
-// 1. Proxying arbitrary URLs passed after the worker domain.
-//    Example: https://myworker.example.workers.dev/https://blocked.com
-// 2. HTMLRewriter that rewrites resource URLs (href/src) so that
-//    relative/absolute links continue to work through the worker.
-// 3. CORS handling – adds Access-Control-Allow-Origin: * and removes
-//    restrictive CSP headers.
-// 4. KV‑based short‑URL storage (env.MY_KV). Use /save?short=yt&url=...
-//    and then access via https://myworker.example.workers.dev/yt
-// ------------------------------------------------------------
+// index.js — Cloudflare Workers 리버스 프록시 (Wrangler v3 / ESM)
+// ──────────────────────────────────────────────────────────────
+// 기능 요약:
+//   1. /https://example.com  → 해당 URL을 대신 fetch하여 반환
+//   2. HTMLRewriter로 a[href], img[src], link[href], script[src] 재작성
+//   3. CORS 허용 + CSP 제거
+//   4. KV 기반 단축 URL (/save?short=yt&url=https://youtube.com → /yt)
+// ──────────────────────────────────────────────────────────────
 
-/**
- * Helper class to rewrite a specific attribute (e.g., href, src).
- * It prefixes the worker’s own URL to any relative link and rewrites
- * absolute links that point to the original target so they route through
- * the worker again.
- */
+// ── HTMLRewriter용 핸들러 ──────────────────────────────────────
 class AttributeRewriter {
   /**
-   * @param {string} attributeName – attribute to rewrite ("href" or "src").
+   * @param {string} attr  - 재작성할 속성명 (href 또는 src)
+   * @param {string} workerBase - 워커 origin (예: https://bib.mintube.workers.dev)
+   * @param {string} targetOrigin - 프록시 대상 origin (예: https://example.com)
    */
-  constructor(attributeName, workerBase) {
-    this.attributeName = attributeName;
+  constructor(attr, workerBase, targetOrigin) {
+    this.attr = attr;
     this.workerBase = workerBase;
+    this.targetOrigin = targetOrigin;
   }
 
-  /**
-   * Called for each element that matches the selector registered with
-   * HTMLRewriter (e.g., 'a', 'img').
-   * @param {Element} element
-   */
-  element(element) {
-    const original = element.getAttribute(this.attributeName);
-    if (!original) return;
+  element(el) {
+    const val = el.getAttribute(this.attr);
+    if (!val) return;
 
-    // If the URL already starts with the worker domain, leave it untouched.
-    const workerBase = this.workerBase; // injected before usage
-    if (original.startsWith(workerBase)) {
+    // 이미 워커 도메인을 경유하는 링크는 건드리지 않음
+    if (val.startsWith(this.workerBase)) return;
+
+    // ① 절대 URL (http:// 또는 https://)
+    if (/^https?:\/\//i.test(val)) {
+      el.setAttribute(this.attr, `${this.workerBase}/${val}`);
       return;
     }
 
-    // Absolute URLs (http/https) – rewrite to go through the worker.
-    if (original.startsWith('http://') || original.startsWith('https://')) {
-      const rewritten = `${workerBase}/${original}`;
-      element.setAttribute(this.attributeName, rewritten);
+    // ② 프로토콜-상대 URL (//cdn.example.com/...)
+    if (val.startsWith('//')) {
+      el.setAttribute(this.attr, `${this.workerBase}/https:${val}`);
       return;
     }
 
-    // Protocol‑relative URLs (//example.com)
-    if (original.startsWith('//')) {
-      const rewritten = `${workerBase}/https:${original}`;
-      element.setAttribute(this.attributeName, rewritten);
+    // ③ 루트-상대 URL (/path/to/resource)
+    if (val.startsWith('/')) {
+      el.setAttribute(this.attr, `${this.workerBase}/${this.targetOrigin}${val}`);
       return;
     }
 
-    // Relative URLs – simply prefix with the worker base.
-    // Ensure we do not produce a duplicate slash.
-    const slash = original.startsWith('/') ? '' : '/';
-    const rewritten = `${workerBase}${slash}${original}`;
-    element.setAttribute(this.attributeName, rewritten);
+    // ④ 상대 URL (path/to/resource) — 타깃 origin 기준으로 변환
+    el.setAttribute(this.attr, `${this.workerBase}/${this.targetOrigin}/${val}`);
   }
 }
 
-/**
- * Main fetch event handler.
- * @param {Request} request
- * @param {Object} env – environment bindings (e.g., MY_KV).
- * @param {Object} ctx – context (not used here).
- */
+// ── 메인 핸들러 ───────────────────────────────────────────────
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const workerBase = `${url.protocol}//${url.host}`;
-    const path = url.pathname.substring(1);
-    // Handle CORS preflight requests
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET,HEAD,POST,OPTIONS',
-          'Access-Control-Allow-Headers': '*',
-        },
-      });
-    }
-
-
-
-    // -----------------------------------------------------------------
-    // 1️⃣  KV handling – saving and redirecting short URLs.
-    // -----------------------------------------------------------------
-    if (path.startsWith('save') && request.method === 'GET') {
-      const short = url.searchParams.get('short');
-      const target = url.searchParams.get('url');
-      if (!short || !target) {
-        return new Response('Missing "short" or "url" query parameters.', { status: 400 });
-      }
-      // Store in KV with a reasonable TTL (optional). Here we store permanently.
-      await env.MY_KV.put(short, target);
-      return new Response(`Saved short URL \"${short}\" → ${target}`);
-    }
-
-    // If the path matches a key in KV, treat it as a short URL.
-    const kvTarget = await env.MY_KV.get(path);
-    
-    // -----------------------------------------------------------------
-    // 2️⃣  Direct proxying – the path itself is the target URL.
-    // -----------------------------------------------------------------
-    let targetUrl = kvTarget || (path ? decodeURIComponent(path) : null);
-
-    // Guard against empty path.
-    if (!targetUrl) {
-      return new Response('Usage:\n  /save?short=key&url=target   – store a short URL\n  /key                               – fetch via short URL\n  /https://example.com               – proxy arbitrary URL', {
-        status: 200,
-        headers: { 'Content-Type': 'text/plain' },
-      });
-    }
-
-    // Basic validation – must start with http(s).
-    if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
-      return new Response('Target URL must start with http:// or https://', { status: 400 });
-    }
-
     try {
-      return await proxyRequest(targetUrl, request, env, workerBase);
-    } catch (e) {
-      return new Response(`Error fetching URL: ${e.message}`, { status: 500 });
+      const url = new URL(request.url);
+      const workerBase = url.origin;            // https://bib.mintube.workers.dev
+      const path = url.pathname.substring(1);   // 첫 번째 '/' 제거
+
+      // ── CORS 프리플라이트 ──
+      if (request.method === 'OPTIONS') {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
+            'Access-Control-Allow-Headers': '*',
+          },
+        });
+      }
+
+      // ── 1) 단축 URL 저장: /save?short=yt&url=https://youtube.com ──
+      if (path === 'save') {
+        const short = url.searchParams.get('short');
+        const target = url.searchParams.get('url');
+        if (!short || !target) {
+          return new Response(
+            'Missing "short" or "url" query parameter.\n' +
+            'Usage: /save?short=yt&url=https://youtube.com',
+            { status: 400, headers: { 'Content-Type': 'text/plain; charset=utf-8' } },
+          );
+        }
+        await env.MY_KV.put(short, target);
+        return new Response(
+          `✅ Saved: "${short}" → ${target}`,
+          { status: 200, headers: { 'Content-Type': 'text/plain; charset=utf-8' } },
+        );
+      }
+
+      // ── 2) 타깃 URL 결정 ──
+      let targetUrl = null;
+
+      // path가 http(s)로 시작하면 직접 프록시
+      if (/^https?:\/\//i.test(path)) {
+        // pathname + search + hash 까지 온전히 복원
+        targetUrl = url.pathname.substring(1) + url.search + url.hash;
+      } else if (path) {
+        // KV에서 단축어 조회
+        const kvVal = await env.MY_KV.get(path);
+        if (kvVal) {
+          targetUrl = kvVal;
+        }
+      }
+
+      // 아무것도 매칭되지 않으면 사용법 안내
+      if (!targetUrl) {
+        return new Response(
+          '🔀 Cloudflare Workers Reverse Proxy\n\n' +
+          'Usage:\n' +
+          '  /<full URL>                        — proxy any URL\n' +
+          '  /save?short=<key>&url=<target>     — save a short URL\n' +
+          '  /<key>                             — use a saved short URL\n\n' +
+          'Examples:\n' +
+          '  /https://example.com\n' +
+          '  /save?short=yt&url=https://youtube.com\n' +
+          '  /yt\n',
+          { status: 200, headers: { 'Content-Type': 'text/plain; charset=utf-8' } },
+        );
+      }
+
+      // ── 3) 프록시 요청 실행 ──
+      return await proxyFetch(targetUrl, request, workerBase);
+
+    } catch (err) {
+      return new Response(`Worker error: ${err.stack || err.message}`, {
+        status: 500,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      });
     }
   },
 };
 
-/**
- * Performs the actual fetch to the target URL, rewrites HTML
- * if needed,
- * and adjusts response headers.
- * @param {string} targetUrl
- * @param {Request} originalRequest
- * @param {Object} env
- * @param {string} workerBase – e.g., https://myworker.workers.dev
- */
-async function proxyRequest(targetUrl, originalRequest, env, workerBase) {
-  // Preserve the original method and body (except for OPTIONS which we handle later).
-  const init = {
-    method: originalRequest.method,
-    headers: originalRequest.headers,
-    redirect: 'manual',
-    body: originalRequest.body,
-  };
+// ── 프록시 fetch 함수 ─────────────────────────────────────────
+async function proxyFetch(targetUrl, originalReq, workerBase) {
+  // GET/HEAD 요청에는 body를 보내면 안 됨
+  const hasBody = !['GET', 'HEAD'].includes(originalReq.method);
 
-  const fetched = await fetch(targetUrl, init);
+  const resp = await fetch(targetUrl, {
+    method: originalReq.method,
+    headers: originalReq.headers,
+    body: hasBody ? originalReq.body : undefined,
+    redirect: 'follow',
+  });
 
-  // Clone the response so we can modify headers safely.
-  const responseHeaders = new Headers(fetched.headers);
+  // ── 응답 헤더 복사 & 조정 ──
+  const headers = new Headers(resp.headers);
+  headers.set('Access-Control-Allow-Origin', '*');
+  headers.delete('Content-Security-Policy');
+  headers.delete('Content-Security-Policy-Report-Only');
+  headers.delete('X-Frame-Options');
 
-  // ---------------------------------------------------------------
-  // CORS & CSP handling
-  // ---------------------------------------------------------------
-  responseHeaders.set('Access-Control-Allow-Origin', '*');
-  // Remove any existing CSP header to avoid blocking the page.
-  responseHeaders.delete('Content-Security-Policy');
-  responseHeaders.delete('Content-Security-Policy-Report-Only');
+  // ── HTML이면 HTMLRewriter 적용 ──
+  const ct = headers.get('content-type') || '';
+  if (ct.includes('text/html')) {
+    const targetOrigin = new URL(targetUrl).origin;
 
-  // ---------------------------------------------------------------
-  // HTML rewriting – only for responses that declare HTML content.
-  // ---------------------------------------------------------------
-  const contentType = responseHeaders.get('content-type') || '';
-  if (contentType.includes('text/html')) {
-    // Re‑use the AttributeRewriter for the four element types.
     const rewriter = new HTMLRewriter()
-      .on('a', new AttributeRewriter('href', workerBase))
-      .on('img', new AttributeRewriter('src', workerBase))
-      .on('link', new AttributeRewriter('href', workerBase))
-      .on('script', new AttributeRewriter('src', workerBase));
-    // No need for a separate handlers loop; workerBase is already embedded.
-    const rewritten = rewriter.transform(fetched);
-    return new Response(rewritten.body, {
-      status: fetched.status,
-      statusText: fetched.statusText,
-      headers: responseHeaders,
-    });
+      .on('a[href]',     new AttributeRewriter('href', workerBase, targetOrigin))
+      .on('img[src]',    new AttributeRewriter('src',  workerBase, targetOrigin))
+      .on('link[href]',  new AttributeRewriter('href', workerBase, targetOrigin))
+      .on('script[src]', new AttributeRewriter('src',  workerBase, targetOrigin));
+
+    return rewriter.transform(
+      new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers }),
+    );
   }
 
-  // For non‑HTML responses, just forward the body with adjusted headers.
-  return new Response(fetched.body, {
-    status: fetched.status,
-    statusText: fetched.statusText,
-    headers: responseHeaders,
+  // HTML이 아니면 그대로 전달
+  return new Response(resp.body, {
+    status: resp.status,
+    statusText: resp.statusText,
+    headers,
   });
 }
