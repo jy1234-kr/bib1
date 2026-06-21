@@ -22,8 +22,9 @@ class AttributeRewriter {
   /**
    * @param {string} attributeName – attribute to rewrite ("href" or "src").
    */
-  constructor(attributeName) {
+  constructor(attributeName, workerBase) {
     this.attributeName = attributeName;
+    this.workerBase = workerBase;
   }
 
   /**
@@ -72,11 +73,24 @@ class AttributeRewriter {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const path = url.pathname.slice(1); // remove leading '/'
-    const workerBase = `${url.origin}`; // e.g., https://myworker.workers.dev
+    const workerBase = `${url.protocol}//${url.host}`;
+    const path = url.pathname.substring(1);
+    // Handle CORS preflight requests
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET,HEAD,POST,OPTIONS',
+          'Access-Control-Allow-Headers': '*',
+        },
+      });
+    }
+
+
 
     // -----------------------------------------------------------------
-    // 1️⃣  Short‑URL handling (/save?short=...&url=... and /{short})
+    // 1️⃣  KV handling – saving and redirecting short URLs.
     // -----------------------------------------------------------------
     if (path.startsWith('save') && request.method === 'GET') {
       const short = url.searchParams.get('short');
@@ -91,41 +105,36 @@ export default {
 
     // If the path matches a key in KV, treat it as a short URL.
     const kvTarget = await env.MY_KV.get(path);
-    if (kvTarget) {
-      // Recursively handle the fetched URL as if the user requested it directly.
-      return await proxyRequest(kvTarget, request, env, workerBase);
-    }
-
+    
     // -----------------------------------------------------------------
     // 2️⃣  Direct proxying – the path itself is the target URL.
     // -----------------------------------------------------------------
+    let targetUrl = kvTarget || (path ? decodeURIComponent(path) : null);
+
     // Guard against empty path.
-    if (!path) {
+    if (!targetUrl) {
       return new Response('Usage:\n  /save?short=key&url=target   – store a short URL\n  /key                               – fetch via short URL\n  /https://example.com               – proxy arbitrary URL', {
         status: 200,
         headers: { 'Content-Type': 'text/plain' },
       });
     }
 
-    // The user is expected to URL‑encode the target URL after the first slash.
-    // Decode it to obtain the real URL.
-    let targetUrl;
-    try {
-      targetUrl = decodeURIComponent(path);
-    } catch (e) {
-      return new Response('Failed to decode target URL.', { status: 400 });
-    }
     // Basic validation – must start with http(s).
     if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
       return new Response('Target URL must start with http:// or https://', { status: 400 });
     }
 
-    return await proxyRequest(targetUrl, request, env, workerBase);
+    try {
+      return await proxyRequest(targetUrl, request, env, workerBase);
+    } catch (e) {
+      return new Response(`Error fetching URL: ${e.message}`, { status: 500 });
+    }
   },
 };
 
 /**
- * Performs the actual fetch to the target URL, rewrites HTML if needed,
+ * Performs the actual fetch to the target URL, rewrites HTML
+ * if needed,
  * and adjusts response headers.
  * @param {string} targetUrl
  * @param {Request} originalRequest
@@ -161,15 +170,11 @@ async function proxyRequest(targetUrl, originalRequest, env, workerBase) {
   if (contentType.includes('text/html')) {
     // Re‑use the AttributeRewriter for the four element types.
     const rewriter = new HTMLRewriter()
-      .on('a', new AttributeRewriter('href'))
-      .on('img', new AttributeRewriter('src'))
-      .on('link', new AttributeRewriter('href'))
-      .on('script', new AttributeRewriter('src'));
-
-    // Pass workerBase to each rewriter instance via a property.
-    // (HTMLRewriter will call the same instance for every element.)
-    rewriter.handlers.forEach(h => (h.handler.workerBase = workerBase));
-
+      .on('a', new AttributeRewriter('href', workerBase))
+      .on('img', new AttributeRewriter('src', workerBase))
+      .on('link', new AttributeRewriter('href', workerBase))
+      .on('script', new AttributeRewriter('src', workerBase));
+    // No need for a separate handlers loop; workerBase is already embedded.
     const rewritten = rewriter.transform(fetched);
     return new Response(rewritten.body, {
       status: fetched.status,
