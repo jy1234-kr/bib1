@@ -73,19 +73,22 @@ class HeadInjector {
         input=rw(input.href);
       }else if(input instanceof Request){
         var newUrl=rw(input.url);
-        // Request를 복제하면서 URL만 변경 (body 보존)
-        input=new Request(newUrl,{
+        var reqInit={
           method:input.method,
           headers:input.headers,
-          body:input.body,
-          mode:input.mode==='navigate'?'same-origin':input.mode,
           credentials:input.credentials,
           cache:input.cache,
           redirect:input.redirect,
           referrer:input.referrer,
           integrity:input.integrity,
           signal:input.signal
-        });
+        };
+        if(input.method!=='GET'&&input.method!=='HEAD'){
+          try{
+            reqInit.body=input.clone().body;
+          }catch(_e){}
+        }
+        input=new Request(newUrl,reqInit);
       }
     }catch(e){console.warn('[proxy] fetch rewrite error:',e)}
     return _fetch.call(this,input,init);
@@ -211,13 +214,19 @@ export default {
       }
 
       if (!targetUrl) {
-        return text(
-          '🔀 Reverse Proxy\n\n' +
-          'Usage:\n' +
-          '  /https://example.com         — proxy a URL\n' +
-          '  /save?short=key&url=target   — save short URL\n' +
-          '  /key                         — use saved short URL\n'
-        );
+        // Render a gorgeous browser-in-browser UI landing page
+        return new Response(getBrowserUI(workerBase), {
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        });
+      }
+
+      // ── 2.5) Proxy wrapper UI check ──
+      // If path is "browser" followed by target URL, render the browser frame wrapper
+      if (rawPath.startsWith('browser/')) {
+        const actualTarget = rawPath.substring('browser/'.length) + url.search + url.hash;
+        return new Response(getBrowserFrame(workerBase, actualTarget), {
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        });
       }
 
       // ── 3) 프록시 실행 ──
@@ -228,6 +237,460 @@ export default {
     }
   },
 };
+
+// ── Browser UI HTML Template ───────────────────────────────────────
+function getBrowserUI(workerBase) {
+  return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nebula Browser Portal</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-gradient: linear-gradient(135deg, #0f0c20 0%, #15102a 50%, #06040a 100%);
+      --accent: linear-gradient(90deg, #ff007f, #7f00ff);
+      --accent-glow: rgba(127, 0, 255, 0.4);
+      --card-bg: rgba(255, 255, 255, 0.03);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --text: #ffffff;
+      --text-muted: #8b85a3;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg-gradient);
+      color: var(--text);
+      font-family: 'Outfit', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow-x: hidden;
+    }
+    /* Background decorative blobs */
+    .blob {
+      position: absolute;
+      width: 500px;
+      height: 500px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(127,0,255,0.15) 0%, rgba(0,0,0,0) 70%);
+      top: -100px;
+      left: -100px;
+      z-index: 0;
+      animation: float 20s infinite alternate;
+    }
+    .blob2 {
+      position: absolute;
+      width: 600px;
+      height: 600px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(255,0,127,0.1) 0%, rgba(0,0,0,0) 70%);
+      bottom: -150px;
+      right: -150px;
+      z-index: 0;
+      animation: float 25s infinite alternate-reverse;
+    }
+    @keyframes float {
+      0% { transform: translate(0, 0) scale(1); }
+      100% { transform: translate(50px, 50px) scale(1.1); }
+    }
+
+    .container {
+      position: relative;
+      z-index: 1;
+      width: 90%;
+      max-width: 800px;
+      text-align: center;
+      padding: 40px 20px;
+    }
+    h1 {
+      font-size: 3.5rem;
+      font-weight: 800;
+      margin-bottom: 15px;
+      background: linear-gradient(90deg, #ff007f, #b500ff, #00d2ff);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: -1px;
+      animation: titleGlow 6s infinite alternate;
+    }
+    p.desc {
+      font-size: 1.1rem;
+      color: var(--text-muted);
+      margin-bottom: 40px;
+      font-weight: 300;
+    }
+    
+    /* Modern Search / Address Bar */
+    .search-box {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 24px;
+      padding: 8px 8px 8px 24px;
+      display: flex;
+      align-items: center;
+      backdrop-filter: blur(20px);
+      box-shadow: 0 20px 40px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.1);
+      transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+      margin-bottom: 40px;
+    }
+    .search-box:focus-within {
+      border-color: #7f00ff;
+      box-shadow: 0 0 30px var(--accent-glow), 0 20px 40px rgba(0,0,0,0.5);
+      transform: translateY(-2px);
+    }
+    .search-box input {
+      background: transparent;
+      border: none;
+      outline: none;
+      color: #fff;
+      font-size: 1.1rem;
+      flex-grow: 1;
+      font-family: inherit;
+      padding-right: 15px;
+    }
+    .search-box input::placeholder {
+      color: #56506d;
+    }
+    .search-box button {
+      background: var(--accent);
+      border: none;
+      border-radius: 16px;
+      color: white;
+      font-size: 1rem;
+      font-weight: 600;
+      padding: 14px 28px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .search-box button:hover {
+      transform: scale(1.02);
+      box-shadow: 0 5px 15px rgba(255, 0, 127, 0.4);
+    }
+    .search-box button:active {
+      transform: scale(0.98);
+    }
+
+    /* Quick Links */
+    .quick-links {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 16px;
+      margin-top: 20px;
+    }
+    .link-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 20px 15px;
+      cursor: pointer;
+      backdrop-filter: blur(10px);
+      transition: all 0.3s ease;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+      color: inherit;
+    }
+    .link-card:hover {
+      background: rgba(255, 255, 255, 0.07);
+      border-color: rgba(255, 255, 255, 0.2);
+      transform: translateY(-5px);
+      box-shadow: 0 10px 20px rgba(0,0,0,0.3);
+    }
+    .link-icon {
+      font-size: 1.8rem;
+    }
+    .link-name {
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+
+    /* Footer instructions */
+    .footer {
+      margin-top: 60px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+    .footer code {
+      background: rgba(255,255,255,0.05);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: monospace;
+      color: #ff007f;
+    }
+  </style>
+</head>
+<body>
+  <div class="blob"></div>
+  <div class="blob2"></div>
+
+  <div class="container">
+    <h1>NEBULA PROXY</h1>
+    <p class="desc">학교/회사 방화벽 및 URL 차단을 우회하는 개인 전용 고성능 웹 브라우저 허브</p>
+
+    <div class="search-box">
+      <input type="text" id="urlInput" placeholder="접속할 웹사이트 주소 또는 검색어 입력 (예: https://google.com)" autofocus>
+      <button onclick="goProxy()">접속하기</button>
+    </div>
+
+    <div class="quick-links">
+      <a href="javascript:void(0)" onclick="goLink('https://youtube.com')" class="link-card">
+        <span class="link-icon">❤️</span>
+        <span class="link-name">YouTube</span>
+      </a>
+      <a href="javascript:void(0)" onclick="goLink('https://google.com')" class="link-card">
+        <span class="link-icon">🔍</span>
+        <span class="link-name">Google</span>
+      </a>
+      <a href="javascript:void(0)" onclick="goLink('https://wikipedia.org')" class="link-card">
+        <span class="link-icon">📚</span>
+        <span class="link-name">Wikipedia</span>
+      </a>
+      <a href="javascript:void(0)" onclick="goLink('https://github.com')" class="link-card">
+        <span class="link-icon">🐙</span>
+        <span class="link-name">GitHub</span>
+      </a>
+    </div>
+
+    <div class="footer">
+      직접 주소창 이동: <code>\${workerBase}/[접속할주소]</code> 또는 <code>\${workerBase}/browser/[접속할주소]</code>
+    </div>
+  </div>
+
+  <script>
+    const input = document.getElementById('urlInput');
+    input.addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') {
+        goProxy();
+      }
+    });
+
+    function cleanUrl(url) {
+      url = url.trim();
+      if (!url) return '';
+      if (!/^https?:\\/\\//i.test(url)) {
+        if (url.includes('.') && !url.includes(' ')) {
+          url = 'https://' + url;
+        } else {
+          url = 'https://www.google.com/search?q=' + encodeURIComponent(url);
+        }
+      }
+      return url;
+    }
+
+    function goProxy() {
+      const target = cleanUrl(input.value);
+      if (target) {
+        window.location.href = '${workerBase}/browser/' + target;
+      }
+    }
+
+    function goLink(url) {
+      window.location.href = '${workerBase}/browser/' + url;
+    }
+  </script>
+</body>
+</html>`;
+}
+
+function getBrowserFrame(workerBase, targetUrl) {
+  return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nebula Frame Browser</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0b0914;
+      color: #fff;
+      font-family: 'Outfit', sans-serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    /* Modern Glassmorphic Address Bar / Nav */
+    .nav-bar {
+      display: flex;
+      align-items: center;
+      background: rgba(15, 12, 32, 0.95);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 10px 16px;
+      gap: 12px;
+      backdrop-filter: blur(10px);
+      z-index: 100;
+    }
+    .btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      color: #fff;
+      width: 36px;
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 1rem;
+      transition: all 0.2s;
+    }
+    .btn:hover {
+      background: rgba(255, 255, 255, 0.15);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+    .address-bar-container {
+      flex-grow: 1;
+      display: flex;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 2px 6px 2px 14px;
+      align-items: center;
+      transition: all 0.3s;
+    }
+    .address-bar-container:focus-within {
+      background: rgba(255, 255, 255, 0.06);
+      border-color: #7f00ff;
+      box-shadow: 0 0 10px rgba(127, 0, 255, 0.3);
+    }
+    .address-bar-container input {
+      background: transparent;
+      border: none;
+      outline: none;
+      color: #fff;
+      font-family: inherit;
+      font-size: 0.95rem;
+      width: 100%;
+    }
+    .address-bar-container button {
+      background: linear-gradient(90deg, #ff007f, #7f00ff);
+      border: none;
+      border-radius: 8px;
+      color: white;
+      padding: 6px 16px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.85rem;
+      transition: transform 0.1s;
+    }
+    .address-bar-container button:active {
+      transform: scale(0.95);
+    }
+    /* Full Screen Iframe Container */
+    .frame-container {
+      flex-grow: 1;
+      position: relative;
+      background: #fff;
+    }
+    iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="nav-bar">
+    <button class="btn" onclick="goHome()" title="홈으로">🏠</button>
+    <button class="btn" onclick="back()" title="뒤로가기">◀</button>
+    <button class="btn" onclick="forward()" title="앞으로가기">▶</button>
+    <button class="btn" onclick="reload()" title="새로고침">🔄</button>
+    
+    <div class="address-bar-container">
+      <input type="text" id="frameUrlInput" value="\${targetUrl}">
+      <button onclick="navigateFrame()">이동</button>
+    </div>
+  </div>
+
+  <div class="frame-container">
+    <iframe id="proxyFrame" src="\${workerBase}/\${targetUrl}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+  </div>
+
+  <script>
+    const iframe = document.getElementById('proxyFrame');
+    const input = document.getElementById('frameUrlInput');
+
+    input.addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') {
+        navigateFrame();
+      }
+    });
+
+    function cleanUrl(url) {
+      url = url.trim();
+      if (!url) return '';
+      if (!/^https?:\\/\\//i.test(url)) {
+        if (url.includes('.') && !url.includes(' ')) {
+          url = 'https://' + url;
+        } else {
+          url = 'https://www.google.com/search?q=' + encodeURIComponent(url);
+        }
+      }
+      return url;
+    }
+
+    function navigateFrame() {
+      const dest = cleanUrl(input.value);
+      if (dest) {
+        // Change browser URL so bookmarks/reloads work
+        window.history.pushState({}, '', '\${workerBase}/browser/' + dest);
+        iframe.src = '\${workerBase}/' + dest;
+      }
+    }
+
+    function goHome() {
+      window.location.href = '\${workerBase}/';
+    }
+
+    function reload() {
+      iframe.contentWindow.location.reload();
+    }
+
+    function back() {
+      try {
+        iframe.contentWindow.history.back();
+      } catch(e) {
+        // Fallback if cross-origin rules kick in (though same-origin in proxy)
+        window.history.back();
+      }
+    }
+
+    function forward() {
+      try {
+        iframe.contentWindow.history.forward();
+      } catch(e) {
+        window.history.forward();
+      }
+    }
+
+    // Periodically sync the address bar value with iframe's current path if possible
+    setInterval(function() {
+      try {
+        const frameUrl = iframe.contentWindow.location.href;
+        if (frameUrl.includes('\${workerBase}/')) {
+          const actualPath = frameUrl.substring(frameUrl.indexOf('\${workerBase}/') + '\${workerBase}/'.length);
+          if (actualPath && !actualPath.startsWith('browser/')) {
+            input.value = actualPath;
+            window.history.replaceState({}, '', '\${workerBase}/browser/' + actualPath);
+          }
+        }
+      } catch(e) {
+        // Silent block for cross-origin (in case a redirect escaped proxy)
+      }
+    }, 1000);
+  </script>
+</body>
+</html>`;
+}
 
 // ── 헬퍼 ──────────────────────────────────────────────────────
 function text(t, s = 200) {
