@@ -2,6 +2,10 @@ name = "bib"
 main = "./index.js" 
 compatibility_date = "2024-01-01"
 
+[assets]
+directory = "./frontend/dist"
+binding = "ASSETS"
+
 [[kv_namespaces]]
 binding = "MY_KV"
 id = "3c30772e01264cb8848ac7b272460f6a"

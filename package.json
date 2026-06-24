@@ -1,0 +1,17 @@
+{
+  "name": "browser-in-browser-root",
+  "version": "1.0.0",
+  "description": "Browser in Browser - Core Hub",
+  "main": "server.js",
+  "scripts": {
+    "install:all": "npm install && cd frontend && npm install",
+    "build:frontend": "cd frontend && npm run build",
+    "start": "node server.js",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev": "npm run build:frontend && node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5"
+  }
+}
